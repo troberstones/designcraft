@@ -122,15 +122,54 @@ pub(crate) fn resolve_packaged_links(document: &mut Document, dir: Option<&std::
     }
 }
 
+/// Largest linked file read while importing (a package can name any path on this machine).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_LINKED_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Does `head` start like a graphic a layout can place? A crafted package must not be able to
+/// pull arbitrary local files (keys, configs…) into the document through a link path.
+#[cfg(not(target_arch = "wasm32"))]
+fn looks_like_graphic(head: &[u8]) -> bool {
+    const MAGIC: &[&[u8]] = &[
+        b"\x89PNG",
+        b"\xFF\xD8",
+        b"GIF8",
+        b"II*\0",
+        b"MM\0*",
+        b"II+\0",
+        b"MM\0+",
+        b"BM",
+        b"8BPS",
+        b"%PDF",
+        b"%!PS",
+        b"\xC5\xD0\xD3\xC6",
+        b"\0\0\x01\0",
+    ];
+    if MAGIC.iter().any(|m| head.starts_with(m)) || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP")) {
+        return true;
+    }
+    let text = String::from_utf8_lossy(head);
+    let t = text.trim_start_matches('\u{FEFF}').trim_start();
+    t.starts_with("<svg") || (t.starts_with("<?xml") && t.contains("<svg"))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn read_packaged_link(link: &str, dir: Option<&std::path::Path>) -> Option<(String, Vec<u8>)> {
+    use std::io::Read;
     for path in packaged_link_candidates(link, dir) {
-        if let Ok(bytes) = std::fs::read(&path) {
-            // Keep ordinary Windows drive/UNC syntax for IDML URI export; canonicalize
-            // would introduce a verbatim prefix that is not an IDML file URI.
-            let path = std::path::absolute(&path).unwrap_or(path);
-            return Some((path.to_string_lossy().into_owned(), bytes));
+        let Ok(file) = std::fs::File::open(&path) else { continue };
+        // Regular, bounded files only (no devices or FIFOs), and only graphic content.
+        if !file.metadata().is_ok_and(|m| m.is_file() && m.len() <= MAX_LINKED_FILE_BYTES) {
+            continue;
         }
+        let mut bytes = Vec::new();
+        if file.take(MAX_LINKED_FILE_BYTES).read_to_end(&mut bytes).is_err() || !looks_like_graphic(bytes.get(..512).unwrap_or(&bytes)) {
+            continue;
+        }
+        // Keep ordinary Windows drive/UNC syntax for IDML URI export; canonicalize
+        // would introduce a verbatim prefix that is not an IDML file URI.
+        let path = std::path::absolute(&path).unwrap_or(path);
+        return Some((path.to_string_lossy().into_owned(), bytes));
     }
     None
 }
@@ -260,6 +299,20 @@ mod tests {
         let asset = doc.assets.values().next().unwrap();
         assert_eq!(asset.link.as_deref(), Some(oversized.as_str()));
         assert_eq!(*asset.data, png);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn links_only_read_graphics_regular_files() {
+        let dir = std::env::temp_dir().join(format!("dc-link-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("id_rsa");
+        std::fs::write(&secret, b"-----BEGIN PRIVATE KEY-----").unwrap();
+        assert!(read_packaged_link(secret.to_str().unwrap(), None).is_none(), "non-graphic file must not be read");
+        assert!(read_packaged_link(dir.to_str().unwrap(), None).is_none(), "directory");
+        let png = dir.join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n....").unwrap();
+        assert!(read_packaged_link(png.to_str().unwrap(), None).is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

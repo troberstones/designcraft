@@ -29,6 +29,10 @@ fn uniform_cell_stroke(edges: &[designcraft_doc::CellStrokeAttrs; 4]) -> Option<
     Some(designcraft_doc::CellStroke { weight: first.weight?, color: first.color.clone()?, tint: first.tint?, kind: first.kind.clone()? })
 }
 
+/// Uncompressed size limits for one package part and for the whole package.
+const MAX_PART_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
 /// Import an IDML package. Linked images are read from disk when available (not on wasm).
 pub fn import_idml(bytes: &[u8]) -> Result<Document> {
     import_idml_with(bytes, &default_reader)
@@ -66,15 +70,22 @@ pub fn import_idml_report(bytes: &[u8], read_link: &dyn Fn(&str) -> Option<Vec<u
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
     // Normalised part name → entry name, first entry wins (zip order, so the choice is stable).
     let mut lenient: HashMap<String, String> = HashMap::new();
+    let mut total = 0u64;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).map_err(|e| IdmlError::NotIdml(e.to_string()))?;
         if f.is_dir() {
             continue;
         }
         let name = f.name().to_string();
-        // The size is what the archive claims: don't reserve more than a sane part up front.
+        // The size is what the archive claims: don't reserve more than a sane part up front, and
+        // don't inflate more than the caps allow (a zip bomb must be an error, not an OOM).
         let mut buf = Vec::with_capacity((f.size() as usize).min(1 << 24));
-        f.read_to_end(&mut buf).map_err(|e| IdmlError::Part { part: name.clone(), msg: e.to_string() })?;
+        let room = MAX_PART_BYTES.min(MAX_PACKAGE_BYTES.saturating_sub(total));
+        f.by_ref().take(room.saturating_add(1)).read_to_end(&mut buf).map_err(|e| IdmlError::Part { part: name.clone(), msg: e.to_string() })?;
+        if buf.len() as u64 > room {
+            return Err(IdmlError::Part { part: name, msg: "part (or package) exceeds the size limit when uncompressed".into() });
+        }
+        total += buf.len() as u64;
         lenient.entry(normalize_part_name(&name)).or_insert_with(|| name.clone());
         files.insert(name, buf);
     }
