@@ -1,0 +1,34 @@
+;; macOS sandbox-exec profile for building and running DesignCraft (see dc-sandbox.sh).
+;; Parameters (passed with -D): HOME, REPO.
+;; Starts from "allow all", then removes: the network (loopback stays), reads of common secret
+;; locations, and writes outside the repo, the cargo cache and temp dirs. It is a deny list, so add
+;; anything sensitive it does not know about (password managers, other credentials).
+(version 1)
+(allow default)
+
+(deny network*)
+(allow network* (local ip "localhost:*") (remote ip "localhost:*"))
+
+(deny file-read*
+  (subpath (string-append (param "HOME") "/.ssh"))
+  (subpath (string-append (param "HOME") "/.aws"))
+  (subpath (string-append (param "HOME") "/.gnupg"))
+  (subpath (string-append (param "HOME") "/.config/gh"))
+  (subpath (string-append (param "HOME") "/.claude"))
+  (literal (string-append (param "HOME") "/.claude.json"))
+  (literal (string-append (param "HOME") "/.netrc"))
+  (literal (string-append (param "HOME") "/.git-credentials"))
+  (subpath (string-append (param "HOME") "/Library/Keychains"))
+  (subpath (string-append (param "HOME") "/Library/Cookies"))
+  (subpath (string-append (param "HOME") "/Library/Mail"))
+  (subpath (string-append (param "HOME") "/Library/Messages"))
+  (subpath (string-append (param "HOME") "/Library/Application Support/Google")))
+
+(deny file-write*
+  (require-not
+    (require-any
+      (subpath (param "REPO"))
+      (subpath (string-append (param "HOME") "/.cargo"))
+      (subpath "/private/var/folders")
+      (subpath "/private/tmp")
+      (subpath "/dev"))))
