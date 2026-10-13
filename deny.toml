@@ -1,0 +1,51 @@
+# cargo-deny policy (run by `cargo xtask ci` when cargo-deny is installed: `brew install cargo-deny`
+# or `cargo install cargo-deny --locked`). Known-vulnerable or unmaintained crates, unexpected
+# registries or git sources, and licences outside the project's OSI-only policy fail the check.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # Unmaintained, no fixed version exists; pulled in by krilla / resvg (text shaping for PDF and SVG).
+    # Revisit when krilla/usvg move to harfrust/skrifa. Not a vulnerability.
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained; transitive via krilla/usvg, no upgrade available" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; transitive via fontdb/rustybuzz/usvg, no upgrade available" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Every git dependency is pinned by commit in Cargo.toml; add a new one here only after reviewing it.
+allow-git = [
+    "https://github.com/storytold/craft-libs",
+    "https://github.com/skylartaylor/winit",
+]
+
+[bans]
+multiple-versions = "allow"
+# Workspace crates depend on each other by path with no version.
+wildcards = "allow"
+
+[licenses]
+version = 2
+# Dual-licensed crates (e.g. `MIT OR Apache-2.0 OR LGPL-2.1-or-later`) pass through their permissive
+# option; GPL/LGPL/AGPL-only crates are not allowed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "0BSD",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
