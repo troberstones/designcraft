@@ -283,10 +283,17 @@ fn start_el(e: &quick_xml::events::BytesStart) -> Result<El, String> {
     for a in e.attributes().with_checks(false) {
         let a = a.map_err(|e| e.to_string())?;
         let k = String::from_utf8_lossy(a.key.as_ref()).to_string();
-        let v = a.unescape_value().map(|v| v.to_string()).unwrap_or_else(|_| String::from_utf8_lossy(&a.value).to_string());
+        let v = attr_value(&a).unwrap_or_else(|| String::from_utf8_lossy(&a.value).to_string());
         el.attrs.push((k, v));
     }
     Ok(el)
+}
+
+/// Entity-unescaped attribute value, without the XML attribute-value normalization of
+/// `normalized_value` (tabs/newlines stay as they were read before quick-xml 0.41).
+#[allow(deprecated)]
+fn attr_value(a: &quick_xml::events::attributes::Attribute<'_>) -> Option<String> {
+    a.unescape_value().ok().map(|v| v.into_owned())
 }
 
 #[cfg(test)]
