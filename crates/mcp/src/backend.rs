@@ -94,7 +94,12 @@ impl Backend for Remote {
     fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next_id;
         self.next_id += 1;
-        let line = json!({"id": id, "method": method, "params": params}).to_string();
+        let mut req = json!({"id": id, "method": method, "params": params});
+        // The app requires this when it was started with DESIGNCRAFT_CONTROL_TOKEN set.
+        if let (Some(o), Some(t)) = (req.as_object_mut(), std::env::var("DESIGNCRAFT_CONTROL_TOKEN").ok().filter(|t| !t.is_empty())) {
+            o.insert("token".into(), Value::String(t));
+        }
+        let line = req.to_string();
         if let Err(e) = self.prepare_connection() {
             self.conn = None;
             return Err(format!("DesignCraft app at {} is not reachable: {e}; nothing was sent", self.addr));
@@ -172,6 +177,8 @@ mod tests {
                     Err(e) => panic!("accept failed: {e}"),
                 }
             };
+            // macOS: an accepted socket inherits the listener's non-blocking mode.
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());

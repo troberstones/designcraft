@@ -21,8 +21,14 @@ nothing sent after it on that connection runs. That covers text that isn't JSON,
 an object without `method`, invalid UTF-8, and a line longer than 4 MiB. An HTTP request (for example a
 web page's cross-origin `fetch` to `127.0.0.1:<port>`) therefore can't smuggle a command in its body:
 its request line is rejected first. At most 16 connections are served at once; further ones get an error
-line and are closed. Clients that get an error reply should reconnect. The port has no authentication,
-so only enable it while you use it. Transport: `apps/designcraft/src/control_server.rs`.
+line and are closed. Clients that get an error reply should reconnect.
+
+**Authentication (optional).** Set `DESIGNCRAFT_CONTROL_TOKEN` to a secret before launching the app and
+every request must carry it as a top-level `"token": "<secret>"` string; a request without it (or with a
+different one) gets an `unauthorized` error and the connection is closed. `designcraft mcp --connect` reads
+the same variable and sends it. Unset, the port has no authentication and any local process can control the
+app (open and save files, take screenshots), so set the token whenever other users or untrusted programs share
+the machine, and only enable the port while you use it. Transport: `apps/designcraft/src/control_server.rs`.
 
 ```json
 {"id": 1, "method": "engine.execute", "params": {"command": "frame.create", "params": {"rect": [36, 36, 300, 200], "content": "text"}}}
