@@ -175,6 +175,7 @@ fn cmd_ci() -> Result<(), String> {
                 run(c, "cargo test --workspace")
             }),
         ),
+        ("deny", Box::new(cmd_deny)),
         ("assets", Box::new(|| assets::run(&root()))),
         ("layers", Box::new(cmd_layers)),
         ("wasm", Box::new(cmd_wasm)),
@@ -199,7 +200,37 @@ fn cmd_ci() -> Result<(), String> {
     Ok(())
 }
 
+// The host does not serve HTTPS to common clients, so the download is plain HTTP and its integrity
+// rests on this pinned sha256 (checked before anything is extracted).
+/// Advisories, banned/unknown sources and licences (`deny.toml`). Needs `cargo-deny`
+/// (`brew install cargo-deny` or `cargo install cargo-deny --locked`); without it the step warns and
+/// is skipped so a fresh checkout can still run the rest of CI.
+fn cmd_deny() -> Result<(), String> {
+    let installed = cargo().args(["deny", "--version"]).output().is_ok_and(|o| o.status.success());
+    if !installed {
+        eprintln!("warning: cargo-deny is not installed; skipping the dependency policy check (deny.toml)");
+        return Ok(());
+    }
+    let mut c = cargo();
+    c.args(["deny", "check"]);
+    run(c, "cargo deny check")
+}
+
 const PNGSUITE_URL: &str = "http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz";
+const PNGSUITE_SHA256: &str = "0294b244c95a8342c01b00010cf34abdcabc7c6a34fd0fe1bd963917537bfdc8";
+
+/// sha256 of a file, hex, via the platform tool (`shasum` on macOS/BSD, `sha256sum` on Linux/Git Bash).
+fn sha256_of(path: &std::path::Path) -> Result<String, String> {
+    for (tool, args) in [("shasum", &["-a", "256"][..]), ("sha256sum", &[][..])] {
+        if let Ok(out) = Command::new(tool).args(args).arg(path).output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            return text.split_whitespace().next().map(str::to_lowercase).ok_or_else(|| format!("{tool}: no digest in output"));
+        }
+    }
+    Err("neither `shasum` nor `sha256sum` is available to verify the download".into())
+}
 
 fn cmd_corpus(download: bool) -> Result<(), String> {
     let corpus = root().join("corpus");
@@ -226,6 +257,11 @@ Tests that use a corpus skip cleanly when it is absent.
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", "-o"]).arg(&tgz).arg(PNGSUITE_URL);
     run(curl, &format!("curl {PNGSUITE_URL}"))?;
+    let digest = sha256_of(&tgz)?;
+    if digest != PNGSUITE_SHA256 {
+        let _ = std::fs::remove_file(&tgz);
+        return Err(format!("PngSuite download failed verification: sha256 {digest}, expected {PNGSUITE_SHA256}; nothing was extracted"));
+    }
     let mut tar = Command::new("tar");
     tar.arg("-xzf").arg(&tgz).arg("-C").arg(&dest);
     run(tar, "tar -xzf PngSuite-2017jul19.tgz")?;

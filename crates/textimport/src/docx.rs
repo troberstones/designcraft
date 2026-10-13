@@ -64,11 +64,7 @@ pub(crate) fn parse(xml: &str) -> Result<El, ImportError> {
             Event::Start(e) => {
                 let el = El {
                     name: local(e.name().as_ref()),
-                    attrs: e
-                        .attributes()
-                        .flatten()
-                        .map(|a| (local(a.key.as_ref()), a.unescape_value().map(|v| v.to_string()).unwrap_or_default()))
-                        .collect(),
+                    attrs: e.attributes().flatten().map(|a| (local(a.key.as_ref()), attr_value(&a).unwrap_or_default())).collect(),
                     kids: vec![],
                 };
                 stack.push(el);
@@ -76,11 +72,7 @@ pub(crate) fn parse(xml: &str) -> Result<El, ImportError> {
             Event::Empty(e) => {
                 let el = El {
                     name: local(e.name().as_ref()),
-                    attrs: e
-                        .attributes()
-                        .flatten()
-                        .map(|a| (local(a.key.as_ref()), a.unescape_value().map(|v| v.to_string()).unwrap_or_default()))
-                        .collect(),
+                    attrs: e.attributes().flatten().map(|a| (local(a.key.as_ref()), attr_value(&a).unwrap_or_default())).collect(),
                     kids: vec![],
                 };
                 if let Some(p) = stack.last_mut() {
@@ -396,6 +388,13 @@ pub fn import(bytes: &[u8]) -> Result<Imported, ImportError> {
         list.into_iter().filter(|s| want.contains(&s.name)).collect::<Vec<_>>()
     };
     Ok(Imported { story: st, para_styles: keep(para_styles, &used_p), char_styles: keep(char_styles, &used_c), warnings: ctx.warnings })
+}
+
+/// Entity-unescaped attribute value, without the XML attribute-value normalization of
+/// `normalized_value` (tabs/newlines stay as they were read before quick-xml 0.41).
+#[allow(deprecated)]
+fn attr_value(a: &quick_xml::events::attributes::Attribute<'_>) -> Option<String> {
+    a.unescape_value().ok().map(|v| v.into_owned())
 }
 
 #[cfg(test)]

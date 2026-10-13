@@ -23,6 +23,21 @@ pub const MAX_LINE: usize = 4 * 1024 * 1024;
 /// Connections served at once; further ones get an error line and are closed.
 pub const MAX_CONNECTIONS: usize = 16;
 
+/// Environment variable holding an optional shared secret. When it is set and non-empty, every
+/// request must carry it as a top-level `"token"` string, or the connection is closed. The
+/// MCP client (`designcraft mcp --connect`) reads the same variable and sends it.
+pub const TOKEN_ENV: &str = "DESIGNCRAFT_CONTROL_TOKEN";
+
+/// Equality that doesn't stop at the first differing byte.
+fn token_matches(expected: &str, given: &str) -> bool {
+    let (a, b) = (expected.as_bytes(), given.as_bytes());
+    let mut diff = a.len() ^ b.len();
+    for (i, x) in a.iter().enumerate() {
+        diff |= usize::from(*x ^ b.get(i).copied().unwrap_or(0));
+    }
+    diff == 0
+}
+
 pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
@@ -32,12 +47,16 @@ pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
             return rx;
         }
     };
-    eprintln!("designcraft: control server listening on 127.0.0.1:{port}");
-    std::thread::spawn(move || accept_loop(listener, tx, ctx));
+    let token = std::env::var(TOKEN_ENV).ok().filter(|t| !t.is_empty()).map(Arc::<str>::from);
+    eprintln!(
+        "designcraft: control server listening on 127.0.0.1:{port}{}",
+        if token.is_some() { " (token required)" } else { " (no token: any local process can control the app; set DESIGNCRAFT_CONTROL_TOKEN)" }
+    );
+    std::thread::spawn(move || accept_loop(listener, tx, ctx, token));
     rx
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context) {
+fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Context, token: Option<Arc<str>>) {
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {
         if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
@@ -48,16 +67,17 @@ fn accept_loop(listener: TcpListener, tx: Sender<ControlRequest>, ctx: egui::Con
         let tx = tx.clone();
         let ctx = ctx.clone();
         let open = Arc::clone(&open);
+        let token = token.clone();
         std::thread::spawn(move || {
-            serve(stream, &tx, &ctx);
+            serve(stream, &tx, &ctx, token.as_deref());
             open.fetch_sub(1, Ordering::SeqCst);
         });
     }
 }
 
-fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context) {
+fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, token: Option<&str>) {
     let Ok(read) = stream.try_clone() else { return };
-    serve_lines(read, stream, |method, params| {
+    serve_lines(read, stream, token, |method, params| {
         let (req, rrx) = ControlRequest::new(method, params);
         tx.send(req).ok()?;
         ctx.request_repaint();
@@ -71,6 +91,7 @@ enum Line {
         id: Value,
         method: String,
         params: Value,
+        token: Option<String>,
     },
     Blank,
     /// Not a request: reply with this error and close the connection.
@@ -99,6 +120,7 @@ fn parse_line(bytes: &[u8]) -> Line {
         id: obj.get("id").cloned().unwrap_or(Value::Null),
         method: method.to_string(),
         params: obj.get("params").cloned().unwrap_or(json!({})),
+        token: obj.get("token").and_then(Value::as_str).map(str::to_string),
     }
 }
 
@@ -128,8 +150,9 @@ fn read_bounded_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -
 
 /// Serve requests from `read`, answering on `out`, until the peer closes, sends something that is
 /// not a request, or `handle` returns `None` (app gone). `handle` gets `(method, params)` and
-/// returns the reply object (the request's `id` is added here).
-fn serve_lines<R: Read, W: Write>(read: R, mut out: W, mut handle: impl FnMut(String, Value) -> Option<Value>) {
+/// returns the reply object (the request's `id` is added here). With `auth` set, a request
+/// without the matching `token` is rejected like any non-request.
+fn serve_lines<R: Read, W: Write>(read: R, mut out: W, auth: Option<&str>, mut handle: impl FnMut(String, Value) -> Option<Value>) {
     let mut reader = BufReader::new(read);
     let mut buf = Vec::new();
     loop {
@@ -139,7 +162,10 @@ fn serve_lines<R: Read, W: Write>(read: R, mut out: W, mut handle: impl FnMut(St
             Ok(true) => match parse_line(&buf) {
                 Line::Blank => continue,
                 Line::Reject(e) => e,
-                Line::Request { id, method, params } => {
+                Line::Request { token, .. } if auth.is_some_and(|a| !token.as_deref().is_some_and(|t| token_matches(a, t))) => {
+                    "unauthorized: this control server requires the `token` from DESIGNCRAFT_CONTROL_TOKEN; closing the connection".to_string()
+                }
+                Line::Request { id, method, params, .. } => {
                     let Some(mut r) = handle(method, params) else { return };
                     if let Some(o) = r.as_object_mut() {
                         o.insert("id".into(), id);
@@ -163,12 +189,36 @@ mod tests {
     fn run(input: &[u8]) -> (Vec<Value>, Vec<String>) {
         let mut out = Vec::new();
         let mut calls = Vec::new();
-        serve_lines(input, &mut out, |m, _p| {
+        serve_lines(input, &mut out, None, |m, _p| {
             calls.push(m);
             Some(json!({"ok": true, "result": null}))
         });
         let replies = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect();
         (replies, calls)
+    }
+
+    fn run_auth(input: &[u8], token: &str) -> (Vec<Value>, Vec<String>) {
+        let mut out = Vec::new();
+        let mut calls = Vec::new();
+        serve_lines(input, &mut out, Some(token), |m, _p| {
+            calls.push(m);
+            Some(json!({"ok": true, "result": null}))
+        });
+        let replies = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect();
+        (replies, calls)
+    }
+
+    #[test]
+    fn token_is_required_when_configured() {
+        let (r, calls) = run_auth(b"{\"id\":1,\"method\":\"a\",\"token\":\"s3cret\"}\n{\"id\":2,\"method\":\"b\"}\n{\"method\":\"c\"}\n", "s3cret");
+        assert_eq!(calls, ["a"], "the tokenless request must not run, nor anything after it");
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[1]["ok"], false);
+        for bad in [&b"{\"method\":\"a\"}\n"[..], b"{\"method\":\"a\",\"token\":\"s3cre\"}\n", b"{\"method\":\"a\",\"token\":5}\n"] {
+            let (r, calls) = run_auth(bad, "s3cret");
+            assert!(calls.is_empty() && r.len() == 1 && r[0]["ok"] == false);
+        }
+        assert!(token_matches("abc", "abc") && !token_matches("abc", "abd") && !token_matches("abc", "abcd") && !token_matches("abc", ""));
     }
 
     #[test]
@@ -247,7 +297,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (s, _) = listener.accept().unwrap();
             let read = s.try_clone().unwrap();
-            serve_lines(read, s, |_, _| Some(json!({"ok": true})));
+            serve_lines(read, s, None, |_, _| Some(json!({"ok": true})));
         });
         let mut c = TcpStream::connect(addr).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -266,7 +316,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, _rx) = channel::<ControlRequest>();
-        std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default()));
+        std::thread::spawn(move || accept_loop(listener, tx, egui::Context::default(), None));
         // Idle connections are accepted in order and held open.
         let held: Vec<TcpStream> = (0..16).map(|_| TcpStream::connect(addr).unwrap()).collect();
         let mut extra = TcpStream::connect(addr).unwrap();

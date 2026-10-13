@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 
 pub const MIME: &str = "application/vnd.designcraft+zip";
 pub const VERSION: u32 = 1;
+/// Most bytes one archive part may inflate to when loading.
+const MAX_PART_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FormatError {
@@ -89,9 +91,10 @@ fn load_zip(bytes: &[u8]) -> Result<Document, FormatError> {
     let mut z = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| FormatError::NotOurs(e.to_string()))?;
     let read = |z: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str| -> Option<Vec<u8>> {
         let mut f = z.by_name(name).ok()?;
+        // A zip bomb is a missing part, not an out-of-memory crash.
         let mut v = Vec::new();
-        f.read_to_end(&mut v).ok()?;
-        Some(v)
+        f.by_ref().take(MAX_PART_BYTES + 1).read_to_end(&mut v).ok()?;
+        (v.len() as u64 <= MAX_PART_BYTES).then_some(v)
     };
     if let Some(meta) = read(&mut z, "meta.json")
         && let Ok(m) = serde_json::from_slice::<Value>(&meta)
